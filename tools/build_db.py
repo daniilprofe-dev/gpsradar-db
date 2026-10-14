@@ -4,7 +4,7 @@
 
 Источники (можно комбинировать; дубликаты ближе 30 м склеиваются, приоритет csv > osm > mapatlas):
   --csv файл.csv          свои камеры: lat,lon,limit,dir,type  (limit/dir/type необязательны)
-  --osm-world             OpenStreetMap (Overpass API), весь мир; при отказе — по кускам 30°x30°
+  --osm-world             OpenStreetMap (Overpass API), весь мир кусками 30°x30°
   --osm-country BY        OpenStreetMap по стране (ISO-3166-1)
   --osm-bbox S,W,N,E      OpenStreetMap по прямоугольнику
   --osm-json файл.json    готовый ответ Overpass (out:json), без скачивания
@@ -136,18 +136,15 @@ def load_osm_bbox(bbox):
 
 
 def load_osm_world():
-    try:
-        log("OSM: весь мир одним запросом")
-        return osm_to_records(overpass(osm_query("", "", timeout=900), timeout=1000))
-    except RuntimeError as e:
-        log(f"OSM: одним запросом не вышло ({e}), качаю кусками 30x30")
+    # Кусками 30°x30°: каждый запрос лёгкий (пространственный индекс Overpass), один гигантский
+    # запрос на весь мир с серверов GitHub может висеть десятки минут.
     out = []
     for s in range(-60, 90, 30):
         for w in range(-180, 180, 30):
-            r = osm_to_records(overpass(osm_query("", f"({s},{w},{s + 30},{w + 30})")))
-            log(f"  [{s},{w}]: {len(r)}")
+            r = osm_to_records(overpass(osm_query("", f"({s},{w},{s + 30},{w + 30})", timeout=300), timeout=330))
+            log(f"  OSM [{s},{w}]: {len(r)}")
             out += r
-            time.sleep(2)
+            time.sleep(1)
     return out
 
 

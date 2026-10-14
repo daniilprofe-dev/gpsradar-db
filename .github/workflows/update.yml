@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300  # Overpass бывает перегружен: куски с повторами могут идти долго
     steps:
       - uses: actions/checkout@v4
 
