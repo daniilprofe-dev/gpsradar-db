@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-db
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -18,32 +23,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Весь мир: OpenStreetMap + MapAtlas (+ свои камеры из my_radars.csv), нарезка на квадраты 2°x2°.
+      # Сборщик сам откажется писать базу, если источник вернул 0 камер или камер стало меньше на >10%.
       - name: Build database
         run: |
-          ARGS="--osm-country BY --mapatlas BY"
+          ARGS="--osm-world --mapatlas-all"
           [ -f my_radars.csv ] && ARGS="--csv my_radars.csv $ARGS"
-          python tools/build_db.py $ARGS --out dist
+          python tools/build_db.py $ARGS --tiles . --prev-index index.bin
 
       - name: Publish if cameras changed
         run: |
-          # сравниваем только записи (после 16-байтного заголовка) — версия меняется при каждой сборке
-          if [ -f radars.bin ] && cmp -s <(tail -c +17 radars.bin) <(tail -c +17 dist/radars.bin); then
+          if [ -z "$(git status --porcelain t)" ]; then
             echo "Камеры не изменились — публиковать нечего"
             exit 0
           fi
-          # защита: не публикуем, если камер стало заметно меньше (источник отдал неполные данные)
-          if [ -f radars.bin ]; then
-            OLD=$(python3 -c "import struct;print(struct.unpack('<I',open('radars.bin','rb').read()[8:12])[0])")
-            NEW=$(python3 -c "import struct;print(struct.unpack('<I',open('dist/radars.bin','rb').read()[8:12])[0])")
-            echo "Камер было $OLD, стало $NEW"
-            if [ $((NEW * 100)) -lt $((OLD * 90)) ]; then
-              echo "::error::Камер стало меньше на >10% ($OLD -> $NEW) — похоже на сбой источника, не публикую"
-              exit 1
-            fi
-          fi
-          cp dist/radars.bin dist/radars.ver .
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add radars.bin radars.ver
-          git commit -m "Update radar database ($(cat radars.ver))"
+          git add -A index.bin t
+          git commit -m "Update radar database ($(git status --porcelain t | wc -l) tiles changed)"
           git push
