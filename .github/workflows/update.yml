@@ -1,0 +1,49 @@
+name: Update radar database
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # каждый понедельник 03:00 UTC
+  workflow_dispatch:       # кнопка "Run workflow" во вкладке Actions
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build database
+        run: |
+          ARGS="--osm-country BY --mapatlas BY"
+          [ -f my_radars.csv ] && ARGS="--csv my_radars.csv $ARGS"
+          python tools/build_db.py $ARGS --out dist
+
+      - name: Publish if cameras changed
+        run: |
+          # сравниваем только записи (после 16-байтного заголовка) — версия меняется при каждой сборке
+          if [ -f radars.bin ] && cmp -s <(tail -c +17 radars.bin) <(tail -c +17 dist/radars.bin); then
+            echo "Камеры не изменились — публиковать нечего"
+            exit 0
+          fi
+          # защита: не публикуем, если камер стало заметно меньше (источник отдал неполные данные)
+          if [ -f radars.bin ]; then
+            OLD=$(python3 -c "import struct;print(struct.unpack('<I',open('radars.bin','rb').read()[8:12])[0])")
+            NEW=$(python3 -c "import struct;print(struct.unpack('<I',open('dist/radars.bin','rb').read()[8:12])[0])")
+            echo "Камер было $OLD, стало $NEW"
+            if [ $((NEW * 100)) -lt $((OLD * 90)) ]; then
+              echo "::error::Камер стало меньше на >10% ($OLD -> $NEW) — похоже на сбой источника, не публикую"
+              exit 1
+            fi
+          fi
+          cp dist/radars.bin dist/radars.ver .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add radars.bin radars.ver
+          git commit -m "Update radar database ($(cat radars.ver))"
+          git push
