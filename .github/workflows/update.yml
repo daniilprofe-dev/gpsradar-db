@@ -2,7 +2,8 @@ name: Update radar database
 
 on:
   schedule:
-    - cron: "0 3 * * 1"   # каждый понедельник 03:00 UTC
+    - cron: "0 3 * * 1"   # понедельник 03:00 UTC
+    - cron: "0 3 * * 4"   # четверг 03:00 UTC — запасной, если в понедельник серверы OSM лежали
   workflow_dispatch:       # кнопка "Run workflow" во вкладке Actions
 
 permissions:
@@ -17,28 +18,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300  # Overpass бывает перегружен: куски с повторами могут идти долго
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       # Весь мир: OpenStreetMap + MapAtlas (+ свои камеры из my_radars.csv), нарезка на квадраты 2°x2°.
-      # Сборщик сам откажется писать базу, если источник вернул 0 камер или камер стало меньше на >10%.
+      # Куски OSM, которые не скачались даже после повторов, берутся из прошлой копии (cache/osm).
+      # Сборщик откажется писать базу, если источник вернул 0 камер или камер стало меньше на >10%.
       - name: Build database
         run: |
-          ARGS="--osm-world --mapatlas-all"
+          ARGS="--osm-world --osm-cache cache/osm --mapatlas-all"
           [ -f my_radars.csv ] && ARGS="--csv my_radars.csv $ARGS"
           python tools/build_db.py $ARGS --tiles . --prev-index index.bin
 
       - name: Publish if cameras changed
         run: |
-          if [ -z "$(git status --porcelain t)" ]; then
+          if [ -z "$(git status --porcelain t cache)" ]; then
             echo "Камеры не изменились — публиковать нечего"
             exit 0
           fi
+          TILES=$(git status --porcelain t | wc -l)
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add -A index.bin t
-          git commit -m "Update radar database ($(git status --porcelain t | wc -l) tiles changed)"
+          git add -A index.bin t cache
+          git commit -m "Update radar database ($TILES tiles changed)"
           git push

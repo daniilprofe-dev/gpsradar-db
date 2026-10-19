@@ -5,6 +5,7 @@
 Источники (можно комбинировать; дубликаты ближе 30 м склеиваются, приоритет csv > osm > mapatlas):
   --csv файл.csv          свои камеры: lat,lon,limit,dir,type  (limit/dir/type необязательны)
   --osm-world             OpenStreetMap (Overpass API), весь мир кусками 30°x30°
+  --osm-cache ПАПКА       куда сохранять куски OSM; если кусок не скачался — берётся прошлая копия
   --osm-country BY        OpenStreetMap по стране (ISO-3166-1)
   --osm-bbox S,W,N,E      OpenStreetMap по прямоугольнику
   --osm-json файл.json    готовый ответ Overpass (out:json), без скачивания
@@ -57,11 +58,12 @@ def log(*a):
 
 
 # ------------------------------------------------------------------ OSM
-def overpass(query, timeout=400):
+def overpass(query, timeout=400, rounds=6):
+    """Запрос к Overpass: по кругу по всем зеркалам, пауза между кругами растёт (30 с ... 5 мин)."""
     data = urllib.parse.urlencode({"data": query}).encode()
     last = None
-    for url in OVERPASS:
-        for attempt in range(2):
+    for rnd in range(rounds):
+        for url in OVERPASS:
             try:
                 log(f"  Overpass: {url}")
                 req = urllib.request.Request(url, data=data, headers=UA)
@@ -74,7 +76,10 @@ def overpass(query, timeout=400):
             except Exception as e:
                 last = e
                 log(f"    ошибка: {e}")
-                time.sleep(10 * (attempt + 1))
+        if rnd < rounds - 1:
+            pause = min(30 * 2 ** rnd, 300)
+            log(f"  все зеркала отказали, жду {pause} с (круг {rnd + 1}/{rounds})")
+            time.sleep(pause)
     raise RuntimeError(f"Overpass недоступен: {last}")
 
 
@@ -135,16 +140,44 @@ def load_osm_bbox(bbox):
     return osm_to_records(overpass(osm_query("", f"({bbox})")))
 
 
-def load_osm_world():
-    # Кусками 30°x30°: каждый запрос лёгкий (пространственный индекс Overpass), один гигантский
-    # запрос на весь мир с серверов GitHub может висеть десятки минут.
-    out = []
+def _cache_path(cache_dir, s, w):
+    return os.path.join(cache_dir, f"{s}_{w}.csv")
+
+
+def _cache_write(path, recs):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for lat, lon, lim, d, typ in sorted(recs):
+            f.write(f"{lat:.7f},{lon:.7f},{lim},{d},{typ}\n")
+
+
+def _cache_read(path):
+    with open(path, encoding="utf-8") as f:
+        return [(float(a), float(b), int(c), int(d), int(e)) for a, b, c, d, e in (l.split(",") for l in f if l.strip())]
+
+
+def load_osm_world(cache_dir=None):
+    """Весь мир кусками 30°x30° (каждый запрос лёгкий). Удачные куски сохраняются в cache_dir;
+    если кусок не скачался даже после всех повторов — берётся его прошлая копия из кэша."""
+    out, stale = [], []
     for s in range(-60, 90, 30):
         for w in range(-180, 180, 30):
-            r = osm_to_records(overpass(osm_query("", f"({s},{w},{s + 30},{w + 30})", timeout=300), timeout=330))
-            log(f"  OSM [{s},{w}]: {len(r)}")
+            cp = _cache_path(cache_dir, s, w) if cache_dir else None
+            try:
+                r = osm_to_records(overpass(osm_query("", f"({s},{w},{s + 30},{w + 30})", timeout=300), timeout=330))
+                if cp:
+                    _cache_write(cp, r)
+                log(f"  OSM [{s},{w}]: {len(r)}")
+            except RuntimeError as e:
+                if not (cp and os.path.exists(cp)):
+                    raise
+                r = _cache_read(cp)
+                stale.append(f"{s},{w}")
+                log(f"  OSM [{s},{w}]: не скачался ({e}), беру прошлую копию: {len(r)}")
             out += r
             time.sleep(1)
+    if stale:
+        log(f"OSM: из кэша взяты куски: {'; '.join(stale)}")
     return out
 
 
@@ -337,6 +370,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--csv", action="append", default=[])
     ap.add_argument("--osm-world", action="store_true")
+    ap.add_argument("--osm-cache", metavar="DIR", help="кэш кусков OSM: при сбое Overpass берётся прошлая копия")
     ap.add_argument("--osm-country", action="append", default=[], metavar="ISO")
     ap.add_argument("--osm-bbox", action="append", default=[], metavar="S,W,N,E")
     ap.add_argument("--osm-json", action="append", default=[], metavar="FILE")
@@ -365,7 +399,7 @@ def main():
         for p in a.csv:  # приоритет: свои данные первыми
             add(f"CSV {p}", load_csv(p), must=False)
         if a.osm_world:
-            add("OSM мир", load_osm_world())
+            add("OSM мир", load_osm_world(a.osm_cache))
         for c in a.osm_country:
             add(f"OSM {c}", load_osm_country(c))
         for b in a.osm_bbox:
